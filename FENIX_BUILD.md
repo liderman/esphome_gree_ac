@@ -25,7 +25,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/liderman/esphome_gree_ac
-      ref: REPLACE_WITH_FULL_TESTED_COMMIT_SHA
+      ref: 26fb3f55820768201fab8d95b6c3e82d2f41928f
     components: [sinclair_ac]
 
 logger:
