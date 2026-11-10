@@ -174,6 +174,8 @@ class SinclairACCNT : public SinclairAC {
         bool processUnitReport();
 
         void send_packet();
+        bool check_mode_{false}, check_temp_{false}, awaiting_report_{false};
+        uint8_t expected_mode_{0}, expected_temp_{0}, attempts_{0};
 
         bool verify_packet();
         void handle_packet();

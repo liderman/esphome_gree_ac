@@ -25,7 +25,7 @@ void SinclairACCNT::loop()
         /* do not forget to order for restart of the recieve state machine */
         this->serialProcess_.state = STATE_RESTART;
         /* mark that we have recieved a response */
-        this->wait_response_ = false;
+        /* Only a validated frame releases the response wait below. */
         /* log for ESPHome debug */
         log_packet(this->serialProcess_.data);
 
@@ -34,6 +34,17 @@ void SinclairACCNT::loop()
             return;
         }
 
+        this->wait_response_ = false;
+        const auto &report = this->serialProcess_.data;
+        if (awaiting_report_ && this->update_ == ACUpdate::UpdateClear && report.size() > 10 &&
+            report[3] == protocol::CMD_IN_UNIT_REPORT &&
+            (!check_mode_ || ((report[8] & 0x80) == (expected_mode_ & 0x80) &&
+                              (!(expected_mode_ & 0x80) || (report[8] & 0xf0) == expected_mode_))) &&
+            (!check_temp_ || (report[9] & 0xf0) == expected_temp_)) {
+            ESP_LOGI(TAG, "Unit confirmed requested state on attempt %u", unsigned(attempts_));
+            awaiting_report_ = check_mode_ = check_temp_ = false;
+            attempts_ = 0;
+        }
         this->last_packet_received_ = millis();  /* Set the time at which we received our last packet */
 
         /* A valid recieved packet of accepted type marks module as being ready */
@@ -73,6 +84,12 @@ void SinclairACCNT::control(const climate::ClimateCall &call)
     if (this->state_ != ACState::Ready)
         return;
 
+    if (call.get_mode().has_value() || call.get_target_temperature().has_value()) {
+        attempts_ = 0;
+        awaiting_report_ = false;
+        check_mode_ |= call.get_mode().has_value();
+        check_temp_ |= call.get_target_temperature().has_value();
+    }
     if (call.get_mode().has_value())
     {
         ESP_LOGV(TAG, "Requested mode change");
@@ -144,7 +161,9 @@ void SinclairACCNT::send_packet()
 {
     std::vector<uint8_t> packet(protocol::SET_PACKET_LEN, 0);  /* Initialize packet contents */
 
-    if (this->wait_response_ == true && (millis() - this->last_packet_sent_) < protocol::TIME_REFRESH_PERIOD_MS)
+    const uint32_t elapsed = millis() - this->last_packet_sent_;
+    if (elapsed < protocol::TIME_REFRESH_PERIOD_MS || (this->wait_response_ && elapsed < 700) ||
+        (awaiting_report_ && this->update_ == ACUpdate::UpdateClear && elapsed < 900))
     {
         /* do net send packet too often or when we are waiting for report to come */
         return;
@@ -516,6 +535,12 @@ void SinclairACCNT::send_packet()
 
     this->last_packet_sent_ = millis();  /* Save the time when we sent the last packet */
     this->wait_response_ = true;
+    if (this->update_ == ACUpdate::UpdateStart && (check_mode_ || check_temp_)) {
+        expected_mode_ = packet[8] & 0xf0;
+        expected_temp_ = packet[9] & 0xf0;
+        awaiting_report_ = true;
+        ++attempts_;
+    }
     write_array(packet);                 /* Sent the packet by UART */
     log_packet(packet, true);            /* Log uart for debug purposes */
 
@@ -528,7 +553,14 @@ void SinclairACCNT::send_packet()
             this->update_ = ACUpdate::UpdateClear;
             break;
         case ACUpdate::UpdateClear:
-            this->update_ = ACUpdate::NoUpdate;
+            if (awaiting_report_ && attempts_ < 3) {
+                this->update_ = ACUpdate::UpdateStart;
+            } else {
+                if (awaiting_report_) ESP_LOGW(TAG, "Requested state unconfirmed after %u attempts", unsigned(attempts_));
+                awaiting_report_ = check_mode_ = check_temp_ = false;
+                attempts_ = 0;
+                this->update_ = ACUpdate::NoUpdate;
+            }
             break;
         default:
             this->update_ = ACUpdate::NoUpdate;
